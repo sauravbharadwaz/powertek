@@ -3,6 +3,7 @@ import {
   Activity, Zap, AlertTriangle, MapPin, ChevronRight, Download, MoreHorizontal,
   Eye, Layers, Ruler, Crosshair, Orbit, RotateCw, Power, Cpu, Boxes, Maximize2,
   UploadCloud, FileUp, Trash2, X, Settings, Box, Mountain, Palette, Gauge, Grid3x3,
+  Globe2, Navigation, ExternalLink,
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, ResponsiveContainer,
@@ -23,6 +24,8 @@ import {
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import LidarScene from "@/components/LidarScene";
 import ErrorBoundary from "@/components/ErrorBoundary";
+import LocationMap from "@/components/LocationMap";
+import { CRS_OPTIONS, suggestEpsg, surveyGeo, fmtLatLng } from "@/lib/geo";
 import {
   loadPointCloud, demoDataset, availableModes, histogram,
   fmtInt, fmtBytes, fmtNum, CLASSES, TARGET_POINTS,
@@ -121,17 +124,30 @@ export default function App() {
   const [now, setNow] = useState(new Date());
   const [toast, setToast] = useState(null);
   const [dragging, setDragging] = useState(false);
+  const [epsg, setEpsg] = useState(0);          // active CRS for geolocation
+  const [pin, setPin] = useState(null);         // manual [lat,lng] fallback
   const fileRef = useRef(null);
 
   const ds = datasets.find((d) => d.id === activeId) || demo;
 
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
 
-  // pick a sensible default colour mode whenever the active dataset changes
+  // pick sensible defaults whenever the active dataset changes
   useEffect(() => {
-    const m = availableModes(ds);
     setMode(ds.hasRGB ? "rgb" : ds.hasClass ? "classification" : "elevation");
+    setEpsg(ds.ext === "demo" ? 0 : suggestEpsg(ds.bounds).epsg);
+    setPin(null);
   }, [activeId]);
+
+  const suggestion = useMemo(
+    () => (ds.ext === "demo" ? { epsg: 0, note: "sample data — drop a pin to preview a location" } : suggestEpsg(ds.bounds)),
+    [ds]
+  );
+  const geo = useMemo(() => {
+    if (epsg > 0) return surveyGeo(ds.bounds, epsg);
+    if (pin) return { center: pin, corners: null };
+    return null;
+  }, [ds, epsg, pin]);
 
   function flashToast(m) { setToast(m); setTimeout(() => setToast(null), 2800); }
 
@@ -344,6 +360,58 @@ export default function App() {
                 <StatTile icon={Gauge} label="Point density" value={fmtNum(density)} unit="pts/m²" sub={`area ${fmtNum(areaM2, 0)} m²`} accent={C.major} />
                 <StatTile icon={Layers} label="Attributes" value={[ds.hasRGB && "RGB", ds.hasIntensity && "Int.", ds.hasClass && "Class"].filter(Boolean).join(" · ") || "XYZ"} sub={`${availableModes(ds).length} colour modes`} accent={C.cyan} />
               </div>
+
+              {/* geographic location */}
+              <Card className="border-border/60 bg-card/70">
+                <CardHeader className="pb-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <CardTitle className="flex items-center gap-1.5 text-base"><Globe2 className="size-4" style={{ color: C.cyan }} /> Geographic location</CardTitle>
+                      <CardDescription className="font-mono text-[11px]">real-world position on satellite imagery · free basemap, no key</CardDescription>
+                    </div>
+                    {geo && (
+                      <div className="flex items-center gap-2">
+                        <a href={`https://earth.google.com/web/@${geo.center[0]},${geo.center[1]},0a,1200d,35y,0h,0t,0r`} target="_blank" rel="noreferrer">
+                          <Button variant="outline" size="sm" className="h-8 gap-1.5 font-mono text-[11px]"><Globe2 className="size-3.5" /> Google Earth <ExternalLink className="size-3" /></Button>
+                        </a>
+                        <a href={`https://www.google.com/maps/search/?api=1&query=${geo.center[0]},${geo.center[1]}`} target="_blank" rel="noreferrer">
+                          <Button variant="outline" size="sm" className="h-8 gap-1.5 font-mono text-[11px]"><MapPin className="size-3.5" /> Maps <ExternalLink className="size-3" /></Button>
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                    <div className="lg:col-span-2">
+                      <div className="h-80 overflow-hidden rounded-md border border-border/60">
+                        <LocationMap center={geo?.center || null} corners={geo?.corners || null} accent={C.cyan} onPick={(ll) => { setEpsg(0); setPin(ll); }} />
+                      </div>
+                      <div className="mt-1.5 font-mono text-[10px] text-muted-foreground">{epsg > 0 ? "footprint reprojected from the file's coordinates" : "click the map to drop a pin for this survey"}</div>
+                    </div>
+                    <div className="flex flex-col gap-3">
+                      <div>
+                        <div className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">coordinate system (CRS)</div>
+                        <select value={epsg} onChange={(e) => { setEpsg(+e.target.value); setPin(null); }} className="h-9 w-full rounded-md border border-input bg-background px-2 font-mono text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring">
+                          {CRS_OPTIONS.map((o) => <option key={o.epsg} value={o.epsg}>{o.label}</option>)}
+                        </select>
+                        <div className="mt-1.5 flex items-start gap-1.5 font-mono text-[10px] text-muted-foreground"><Navigation className="mt-0.5 size-3 shrink-0" style={{ color: C.major }} /> {suggestion.note}</div>
+                      </div>
+                      <Separator />
+                      <div className="flex flex-col gap-2 font-mono text-[11px]">
+                        <div className="flex items-center justify-between gap-2"><span className="text-muted-foreground">Centre</span><span className="truncate text-right">{geo ? fmtLatLng(geo.center) : "—"}</span></div>
+                        <div className="flex items-center justify-between gap-2"><span className="text-muted-foreground">Source</span><span className="text-right">{epsg > 0 ? `EPSG:${epsg}` : pin ? "manual pin" : "not set"}</span></div>
+                        <div className="flex items-center justify-between gap-2"><span className="text-muted-foreground">Footprint</span><span className="text-right">{epsg > 0 ? `${fmtNum(Lx)} × ${fmtNum(Ly)} m` : "—"}</span></div>
+                      </div>
+                      {!geo && (
+                        <div className="rounded-md border border-border/60 bg-muted/30 p-2.5 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                          No real-world location yet. If the file is projected (e.g. UTM), pick its zone above; otherwise click the map to place it manually.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
 
               {/* details + charts */}
               <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
